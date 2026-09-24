@@ -1,1 +1,0 @@
-# hamleys-kpi-studio
