@@ -1,5 +1,13 @@
 // Retail KPI Studio - Store Sales Report Generator
 // Client-side Application Logic
+//
+// STORAGE ARCHITECTURE:
+//   retail_kpi_permanent  → Store name (never clears)
+//   retail_kpi_monthly    → MTD numbers, monthly targets, fixed targets
+//                           Auto-resets to 0 on 1st of each month
+//   Daily fields          → NOT saved (FF, categories, telecalling,
+//                           LY same-day, tomorrow targets)
+//   POS extracted         → Not saved (from uploaded file)
 
 document.addEventListener('DOMContentLoaded', () => {
   // Store default / sample template data
@@ -96,24 +104,68 @@ document.addEventListener('DOMContentLoaded', () => {
     mtd_netplay_sale: 46450
   };
 
-  // Field mapping between HTML ID and State key
-  const fieldIds = [
-    'store', 'date', 'month_target', 'target', 'sale', 'ff', 'bill', 'unit', 'upt', 'atv', 'auv', 'conv',
-    'mtd_tgt', 'mtd_sale', 'mtd_sale_pct', 'mtd_ff', 'mtd_bill', 'mtd_qty', 'mtd_upt', 'mtd_atv', 'mtd_auv', 'mtd_conv',
-    'atvd_sale', 'atvd_qty', 'atvd_contri_pct', 'mtd_atvd_contri_pct',
-    'hotspot_sale', 'hotspot_pct', 'mtd_hotspot_pct',
-    'self_demo_sale', 'self_demo_pct', 'mtd_self_demo_pct',
-    'core', 'core_pct', 'mtd_core_sale', 'mtd_core_demo_pct',
-    'mii_sale', 'mii_sale_pct', 'mtd_mii_sale', 'mtd_mii_sale_pct',
-    'battery', 'battery_attach', 'mtd_battery_attach',
-    'bubble', 'bubble_attach', 'mtd_bubble_attach',
-    'multibill_tgt', 'multibill', 'multibill_pct',
-    'loyalty', 'loyalty_pct', 'mtd_loyalty', 'mtd_loyalty_pct',
-    'redcard', 'mtd_redcard',
-    'mtd_ly_sale', 'ly_sale', 'lfl_pct',
+  // ─────────────────────────────────────────────────────────
+  // FIELD CLASSIFICATION
+  // ─────────────────────────────────────────────────────────
+
+  // 🟢 PERMANENT – saved forever in localStorage, never auto-cleared
+  const PERMANENT_FIELDS = ['store'];
+
+  // 🔵 MONTHLY – saved in localStorage, reset to '' on 1st of new month
+  const MONTHLY_FIELDS = [
+    'month_target',
+    'mtd_tgt', 'mtd_sale', 'mtd_sale_pct', 'mtd_ff', 'mtd_bill', 'mtd_qty',
+    'mtd_upt', 'mtd_atv', 'mtd_auv', 'mtd_conv',
+    'mtd_atvd_contri_pct',
+    'mtd_hotspot_pct',
+    'mtd_self_demo_pct',
+    'mtd_core_sale', 'mtd_core_demo_pct',
+    'mtd_mii_sale', 'mtd_mii_sale_pct',
+    'mtd_battery_attach',
+    'mtd_bubble_attach',
+    'multibill_tgt',
+    'mtd_loyalty', 'mtd_loyalty_pct',
+    'mtd_redcard',
+    'mtd_ly_sale',
+    'mtd_call', 'mtd_tele_bill', 'mtd_tele_sale',
+    'tele_tgt',
+    'mtd_netplay_tgt', 'mtd_netplay_sale'
+  ];
+
+  // 🔴 DAILY – NEVER saved; user must enter fresh each day
+  const DAILY_FIELDS = [
+    'date',
+    'target', 'ff',
+    'hotspot_sale',
+    'self_demo_sale',
+    'core',
+    'atvd_sale', 'atvd_qty', 'atvd_contri_pct',
+    'loyalty', 'redcard',
+    'tele_calls', 'tele_sale', 'tele_bills',
+    'instore_sale', 'instore_bill',
+    'hd_sale', 'hd_bill',
+    'ly_sale',
     'tomorrow_tgt', 'tomorrow_netplay_tgt',
-    'tele_tgt', 'tele_calls', 'tele_sale', 'tele_bills', 'instore_sale', 'instore_bill', 'hd_sale', 'hd_bill', 'mtd_call', 'mtd_tele_bill', 'mtd_tele_sale',
-    'netplay_tgt', 'netplay_sale', 'mtd_netplay_tgt', 'mtd_netplay_sale'
+    'netplay_tgt'
+  ];
+
+  // 🟡 POS-EXTRACTED – filled from uploaded file, not saved
+  const EXTRACTED_FIELDS = [
+    'sale', 'bill', 'unit',
+    'battery', 'bubble', 'multibill',
+    'mii_sale', 'netplay_sale',
+    'upt', 'atv', 'auv', 'conv',
+    'battery_attach', 'bubble_attach', 'multibill_pct',
+    'hotspot_pct', 'self_demo_pct', 'core_pct', 'mii_sale_pct',
+    'loyalty_pct', 'lfl_pct'
+  ];
+
+  // All field IDs combined (for event listener attachment)
+  const fieldIds = [
+    ...PERMANENT_FIELDS,
+    ...MONTHLY_FIELDS,
+    ...DAILY_FIELDS,
+    ...EXTRACTED_FIELDS
   ];
 
   // DOM Elements
@@ -240,7 +292,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (saved) {
         return Object.assign({}, DEFAULT_SALESMAN_NAME_MAP, JSON.parse(saved));
       }
-    } catch (e) {}
+    } catch (e) { }
     return Object.assign({}, DEFAULT_SALESMAN_NAME_MAP);
   }
 
@@ -250,7 +302,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (saved) {
         return Object.assign({}, DEFAULT_SALESMAN_TARGET_MAP, JSON.parse(saved));
       }
-    } catch (e) {}
+    } catch (e) { }
     return Object.assign({}, DEFAULT_SALESMAN_TARGET_MAP);
   }
 
@@ -290,27 +342,91 @@ document.addEventListener('DOMContentLoaded', () => {
     return isNaN(n) ? 0 : n;
   }
 
-  // Load Saved or Sample Data
+  // ─────────────────────────────────────────────────────────
+  // SMART STORAGE LOAD / SAVE
+  // ─────────────────────────────────────────────────────────
+
+  function getCurrentMonthKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
+
+  function isFirstDayOfMonth() {
+    return new Date().getDate() === 1;
+  }
+
   function loadInitialData() {
-    const saved = localStorage.getItem('retail_kpi_store_data');
-    if (saved) {
+    // 1. Permanent fields
+    try {
+      const perm = JSON.parse(localStorage.getItem('retail_kpi_permanent') || '{}');
+      PERMANENT_FIELDS.forEach(id => {
+        if (perm[id] !== undefined && perm[id] !== '') setVal(id, perm[id]);
+      });
+    } catch (e) { }
+
+    // 2. Monthly fields — check if month has changed
+    const savedMonthKey = localStorage.getItem('retail_kpi_month_key');
+    const currentMonthKey = getCurrentMonthKey();
+    const monthChanged = savedMonthKey !== currentMonthKey;
+
+    if (!monthChanged) {
+      // Same month — restore saved monthly values
       try {
-        const parsed = JSON.parse(saved);
-        populateForm(parsed);
-        return;
-      } catch (e) {
-        console.warn('Error reading saved data:', e);
+        const monthly = JSON.parse(localStorage.getItem('retail_kpi_monthly') || '{}');
+        MONTHLY_FIELDS.forEach(id => {
+          if (monthly[id] !== undefined) setVal(id, monthly[id]);
+        });
+      } catch (e) { }
+    } else {
+      // New month — clear all monthly fields to blank (user must fill)
+      MONTHLY_FIELDS.forEach(id => setVal(id, ''));
+      // Keep the new month key so next load knows
+      localStorage.setItem('retail_kpi_month_key', currentMonthKey);
+      localStorage.removeItem('retail_kpi_monthly');
+      if (monthChanged && savedMonthKey) {
+        showToast('🆕 New month detected! Monthly targets & MTD reset. Please fill Month Target & MTD data.');
       }
     }
-    populateForm(sampleData);
+
+    // 3. Daily fields — always start blank
+    DAILY_FIELDS.forEach(id => setVal(id, ''));
+
+    // 4. Extracted fields — blank until POS file loaded
+    EXTRACTED_FIELDS.forEach(id => setVal(id, ''));
+
+    // Set today's date
+    const today = new Date();
+    const dd = String(today.getDate()).padStart(2, '0');
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    setVal('date', `${dd}-${mm}-${yyyy}`);
+
+    recalculateAll();
+  }
+
+  function saveCurrentData() {
+    // Save permanent fields
+    const perm = {};
+    PERMANENT_FIELDS.forEach(id => { perm[id] = getVal(id); });
+    localStorage.setItem('retail_kpi_permanent', JSON.stringify(perm));
+
+    // Save monthly fields
+    const monthly = {};
+    MONTHLY_FIELDS.forEach(id => { monthly[id] = getVal(id); });
+    localStorage.setItem('retail_kpi_monthly', JSON.stringify(monthly));
+    localStorage.setItem('retail_kpi_month_key', getCurrentMonthKey());
+
+    // Daily and extracted fields are NOT saved.
   }
 
   function populateForm(data) {
-    fieldIds.forEach(id => {
-      if (data[id] !== undefined) {
-        setVal(id, data[id]);
-      }
+    // Only populate fields that belong to permanent or monthly (for sample/reset)
+    [...PERMANENT_FIELDS, ...MONTHLY_FIELDS].forEach(id => {
+      if (data[id] !== undefined) setVal(id, data[id]);
     });
+    // Daily: always blank on load
+    DAILY_FIELDS.forEach(id => setVal(id, ''));
+    EXTRACTED_FIELDS.forEach(id => setVal(id, ''));
     recalculateAll();
   }
 
@@ -538,13 +654,7 @@ document.addEventListener('DOMContentLoaded', () => {
     reportOutput.textContent = lines.join('\n');
   }
 
-  function saveCurrentData() {
-    const data = {};
-    fieldIds.forEach(id => {
-      data[id] = getVal(id);
-    });
-    localStorage.setItem('retail_kpi_store_data', JSON.stringify(data));
-  }
+  // saveCurrentData is defined above in the smart storage section
 
   // File Handling & Parsing
   dropzone.addEventListener('click', () => fileInput.click());
@@ -793,7 +903,7 @@ document.addEventListener('DOMContentLoaded', () => {
     salesmanNameModal.classList.remove('hidden');
     // Focus first empty input
     const firstEmpty = salesmanNameMappingList.querySelector('.salesman-name-input:not([value])') ||
-                       salesmanNameMappingList.querySelector('.salesman-name-input');
+      salesmanNameMappingList.querySelector('.salesman-name-input');
     if (firstEmpty) setTimeout(() => firstEmpty.focus(), 50);
   }
 
@@ -807,7 +917,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const reader = new FileReader();
 
-    reader.onload = function(e) {
+    reader.onload = function (e) {
       const buffer = e.target.result;
       const textDecoder = new TextDecoder('utf-8');
       const textStart = textDecoder.decode(new Uint8Array(buffer.slice(0, 1024)));
@@ -1325,7 +1435,7 @@ document.addEventListener('DOMContentLoaded', () => {
       Object.keys(r).forEach(k => {
         const keyNorm = k.toUpperCase().replace(/[^A-Z0-9]/g, '');
         const val = String(r[k]).trim();
-        
+
         fieldIds.forEach(fid => {
           const fidNorm = fid.toUpperCase().replace(/[^A-Z0-9]/g, '');
           if (keyNorm === fidNorm && val !== '') {
@@ -1562,10 +1672,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Reset to default
   btnReset.addEventListener('click', () => {
-    if (confirm('Reset all values to sample dataset?')) {
-      localStorage.removeItem('retail_kpi_store_data');
-      populateForm(sampleData);
-      showToast('Form reset to default sample');
+    if (confirm('Reset form?\n\n• Monthly & permanent data will be cleared.\n• Daily fields (FF, categories, targets) are already not saved.')) {
+      localStorage.removeItem('retail_kpi_permanent');
+      localStorage.removeItem('retail_kpi_monthly');
+      localStorage.removeItem('retail_kpi_month_key');
+      // Repopulate with sample monthly/permanent data
+      [...PERMANENT_FIELDS, ...MONTHLY_FIELDS].forEach(id => {
+        if (sampleData[id] !== undefined) setVal(id, sampleData[id]);
+      });
+      DAILY_FIELDS.forEach(id => setVal(id, ''));
+      EXTRACTED_FIELDS.forEach(id => setVal(id, ''));
+      recalculateAll();
+      showToast('Form reset. Daily fields cleared — enter today\'s data.');
     }
   });
 
